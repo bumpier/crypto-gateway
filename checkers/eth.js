@@ -1,6 +1,18 @@
 'use strict';
 
 const axios = require('axios');
+const { hdkey } = require('ethereumjs-wallet');
+
+// Derive the address at 0/index from an account-level xpub (m/44'/60'/0').
+function deriveAddress(xpub, index) {
+  if (!xpub) throw new Error('ETH_XPUB not configured');
+  const wallet = hdkey.fromExtendedKey(xpub).deriveChild(0).deriveChild(index).getWallet();
+  return wallet.getChecksumAddressString();
+}
+
+async function provisionAddress({ cfg, index }) {
+  return { address: deriveAddress(cfg.xpub, index), addressIndex: index };
+}
 
 /**
  * Ethereum checker — Etherscan API v2 (multichain, chainid=1 mainnet).
@@ -49,4 +61,4 @@ async function getIncoming(address, cfg) {
   return out;
 }
 
-module.exports = { getIncoming };
+module.exports = { getIncoming, deriveAddress, provisionAddress };

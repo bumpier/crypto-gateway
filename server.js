@@ -35,14 +35,43 @@ const CONFIG = {
   trongridApiKey: process.env.TRONGRID_API_KEY || '',
   usdtContract: process.env.USDT_CONTRACT || 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t',
   xmrWalletRpc: process.env.XMR_WALLET_RPC || 'http://127.0.0.1:18082/json_rpc',
+  xmrAccountIndex: Number(process.env.XMR_ACCOUNT_INDEX || 0),
 };
 
-const ADDRESSES = {
-  BTC: process.env.BTC_ADDRESS || '',
-  ETH: process.env.ETH_ADDRESS || '',
-  USDT: process.env.USDT_ADDRESS || '',
-  XMR: process.env.XMR_ADDRESS || '',
+// Per-currency addressing. A currency is "enabled" when its prerequisite is set.
+//   derived    : unique address per payment derived from an account xpub
+//   static     : one shared address (USDT — see README)
+//   subaddress : unique Monero subaddress per payment via wallet RPC
+const CURRENCY_CONFIG = {
+  BTC:  { mode: 'derived',    xpub: process.env.BTC_XPUB || '' },
+  ETH:  { mode: 'derived',    xpub: process.env.ETH_XPUB || '' },
+  USDT: { mode: 'static',     address: process.env.USDT_ADDRESS || '' },
+  XMR:  { mode: 'subaddress' },
 };
+
+function isEnabled(currency) {
+  const cc = CURRENCY_CONFIG[currency];
+  if (!cc) return false;
+  if (cc.mode === 'derived') return !!cc.xpub;
+  if (cc.mode === 'static') return !!cc.address;
+  if (cc.mode === 'subaddress') return !!CONFIG.xmrWalletRpc;
+  return false;
+}
+
+// Provision a receive address for a new payment. Throws on any failure
+// (fail-closed: the caller must NOT create the payment).
+async function provisionFor(currency, orderId) {
+  const cc = CURRENCY_CONFIG[currency];
+  if (cc.mode === 'derived') {
+    const index = db.allocateIndex(currency);
+    return checkers[currency].provisionAddress({ cfg: { xpub: cc.xpub }, index, orderId });
+  }
+  if (cc.mode === 'static') {
+    return checkers[currency].provisionAddress({ cfg: { address: cc.address }, index: null, orderId });
+  }
+  // subaddress (XMR): wallet assigns the index
+  return checkers[currency].provisionAddress({ cfg: CONFIG, index: null, orderId });
+}
 
 const CONFIRMATIONS = {
   BTC: Number(process.env.CONFIRMATIONS_BTC || 1),
@@ -146,13 +175,69 @@ async function fireWebhook(payload) {
 // Polling engine
 // --------------------------------------------------------------------------
 
+function settle(currency, p, match, required) {
+  if (!match) return;
+  if (match.confirmations >= required) {
+    if (p.status !== 'confirmed') {
+      db.markConfirmed(p.paymentId, match.txHash, match.confirmations, new Date().toISOString());
+      const fresh = db.getPayment(p.paymentId);
+      console.log(`[poll ${currency}] CONFIRMED ${p.paymentId} (order ${p.orderId}) tx=${match.txHash}`);
+      fireWebhook({ event: 'payment.confirmed', payment: publicView(fresh) });
+    }
+  } else {
+    // Seen on-chain but not deep enough yet — record progress, keep polling.
+    db.markDetected(p.paymentId, match.txHash, match.confirmations);
+  }
+}
+
 async function pollCurrency(currency) {
   const pending = db.getPendingByCurrency(currency);
   if (!pending.length) return;
 
-  const address = ADDRESSES[currency];
-  if (!address) return;
+  const cc = CURRENCY_CONFIG[currency];
+  const required = CONFIRMATIONS[currency];
+  const epsilon = AMOUNT_EPSILON[currency] || 0;
 
+  // derived (BTC/ETH): each payment has its own address — query per address.
+  if (cc.mode === 'derived') {
+    for (const p of pending) {
+      if (!p.wallet) continue;
+      let incoming;
+      try {
+        incoming = await checkers[currency].getIncoming(p.wallet, CONFIG);
+      } catch (err) {
+        console.error(`[poll ${currency}] ${p.paymentId}: ${err.message}`);
+        continue;
+      }
+      const expected = parseFloat(p.amount);
+      const match = incoming.find((tx) => tx.amount + epsilon >= expected);
+      settle(currency, p, match, required);
+    }
+    return;
+  }
+
+  // subaddress (XMR): one wallet call, match on the subaddress index.
+  if (cc.mode === 'subaddress') {
+    let incoming;
+    try {
+      incoming = await checkers[currency].getIncoming(null, CONFIG);
+    } catch (err) {
+      console.error(`[poll ${currency}] ${err.message}`);
+      return;
+    }
+    for (const p of pending) {
+      const expected = parseFloat(p.amount);
+      const match = incoming.find(
+        (tx) => tx.subaddrIndex === p.addressIndex && tx.amount + epsilon >= expected
+      );
+      settle(currency, p, match, required);
+    }
+    return;
+  }
+
+  // static (USDT): shared address — keep amount + time + tx-dedup matching.
+  const address = cc.address;
+  if (!address) return;
   let incoming;
   try {
     incoming = await checkers[currency].getIncoming(address, CONFIG);
@@ -160,34 +245,16 @@ async function pollCurrency(currency) {
     console.error(`[poll ${currency}] ${err.message}`);
     return;
   }
-
-  const required = CONFIRMATIONS[currency];
-  const epsilon = AMOUNT_EPSILON[currency] || 0;
-
   for (const p of pending) {
     const expected = parseFloat(p.amount);
     // Allow 10 min of clock skew between our createdAt and the chain timestamp.
     const createdSec = Math.floor(new Date(p.createdAt).getTime() / 1000) - 600;
-
     const match = incoming.find((tx) =>
       tx.amount + epsilon >= expected &&            // no underpayment settles
       tx.timestamp >= createdSec &&                 // tx happened after we issued the request
       (tx.txHash === p.txHash || !db.txHashUsed(tx.txHash, p.paymentId)) // one tx -> one order
     );
-
-    if (!match) continue;
-
-    if (match.confirmations >= required) {
-      if (p.status !== 'confirmed') {
-        db.markConfirmed(p.paymentId, match.txHash, match.confirmations, new Date().toISOString());
-        const fresh = db.getPayment(p.paymentId);
-        console.log(`[poll ${currency}] CONFIRMED ${p.paymentId} (order ${p.orderId}) tx=${match.txHash}`);
-        fireWebhook({ event: 'payment.confirmed', payment: publicView(fresh) });
-      }
-    } else {
-      // Seen on-chain but not deep enough yet — record progress, keep polling.
-      db.markDetected(p.paymentId, match.txHash, match.confirmations);
-    }
+    settle(currency, p, match, required);
   }
 }
 
@@ -226,7 +293,7 @@ function requireAdmin(req, res, next) {
 app.get('/health', (_req, res) => {
   res.json({
     ok: true,
-    currencies: CURRENCIES.filter((c) => ADDRESSES[c]),
+    currencies: CURRENCIES.filter(isEnabled),
     pollIntervalMs: POLL_INTERVAL_MS,
     expiryMinutes: EXPIRY_MINUTES,
   });
@@ -246,9 +313,16 @@ app.post('/create-payment', async (req, res) => {
   if (!orderId || typeof orderId !== 'string') {
     return res.status(400).json({ error: 'orderId is required' });
   }
-  const address = ADDRESSES[currency];
-  if (!address) {
+  if (!isEnabled(currency)) {
     return res.status(400).json({ error: `${currency} is not configured on this gateway` });
+  }
+
+  let provisioned;
+  try {
+    provisioned = await provisionFor(currency, orderId);
+  } catch (err) {
+    console.error(`[create-payment] provisioning ${currency} failed: ${err.message}`);
+    return res.status(502).json({ error: `failed to provision a ${currency} address` });
   }
 
   const now = new Date();
@@ -257,10 +331,11 @@ app.post('/create-payment', async (req, res) => {
     orderId,
     currency,
     amount: String(amount),
-    wallet: address,
+    wallet: provisioned.address,
     status: 'pending',
     txHash: null,
     confirmations: 0,
+    addressIndex: provisioned.addressIndex,
     createdAt: now.toISOString(),
     expiresAt: new Date(now.getTime() + EXPIRY_MINUTES * 60_000).toISOString(),
     confirmedAt: null,
@@ -273,8 +348,8 @@ app.post('/create-payment', async (req, res) => {
     return res.status(500).json({ error: 'failed to create payment' });
   }
 
-  const qr = await qrDataUrl(currency, address, row.amount);
-  res.status(201).json(publicView(row, { qr, uri: toQrPayload(currency, address, row.amount) }));
+  const qr = await qrDataUrl(currency, row.wallet, row.amount);
+  res.status(201).json(publicView(row, { qr, uri: toQrPayload(currency, row.wallet, row.amount) }));
 });
 
 // GET /payment-status/:paymentId
@@ -312,9 +387,9 @@ app.post('/webhook-test', requireAdmin, async (_req, res) => {
 // --------------------------------------------------------------------------
 
 const server = app.listen(PORT, () => {
-  const configured = CURRENCIES.filter((c) => ADDRESSES[c]);
+  const configured = CURRENCIES.filter(isEnabled);
   console.log(`crypto-gateway listening on :${PORT}`);
-  console.log(`  configured currencies : ${configured.length ? configured.join(', ') : '(none — set *_ADDRESS in .env)'}`);
+  console.log(`  configured currencies : ${configured.length ? configured.join(', ') : '(none — set BTC_XPUB/ETH_XPUB/USDT_ADDRESS/XMR_WALLET_RPC in .env)'}`);
   console.log(`  poll interval         : ${POLL_INTERVAL_MS}ms`);
   console.log(`  expiry window         : ${EXPIRY_MINUTES} min`);
   console.log(`  webhook               : ${WEBHOOK_URL ? WEBHOOK_URL : '(not configured)'}`);

@@ -48,4 +48,11 @@ async function getIncoming(address, cfg) {
   return out;
 }
 
-module.exports = { getIncoming };
+// USDT stays a single static address for now (see README "Security &
+// limitations"). Provisioning just hands back the configured address.
+async function provisionAddress({ cfg }) {
+  if (!cfg.address) throw new Error('USDT_ADDRESS not configured');
+  return { address: cfg.address, addressIndex: null };
+}
+
+module.exports = { getIncoming, provisionAddress };
