@@ -26,13 +26,15 @@ payment-gateway/
 This gateway is a solid, working foundation, but it makes deliberate
 simplifications. **Understand these before taking real money:**
 
-1. **Static, reused addresses.** Each currency uses one address for every
-   order (`*_ADDRESS` in `.env`). Payments are matched by
-   `address + amount + time window`. If two open invoices request the *same
-   amount* in the *same currency*, the gateway cannot reliably tell their
-   payments apart. **Production fix:** derive a unique address per payment from
-   an HD wallet / xpub (BTC, ETH), or use Monero subaddresses / integrated
-   addresses (XMR), or enforce per-invoice unique amounts.
+1. **Unique address per payment (BTC/ETH/XMR).** BTC and ETH derive a fresh
+   address per invoice from your account `xpub` (`BTC_XPUB` / `ETH_XPUB`); XMR
+   creates a fresh subaddress via `monero-wallet-rpc`. Each payment is matched on
+   its OWN address (BTC/ETH) or subaddress index (XMR), so two invoices for the
+   same amount can never be confused. **USDT (TRC-20) is the exception — it still
+   uses one static `USDT_ADDRESS`**, so for USDT keep amounts unique per open
+   invoice (or add per-payment Tron addresses later). Private keys never touch
+   this server: it only ever sees public xpubs (BTC/ETH) and a view-key wallet
+   (XMR).
 
 2. **Confirmation depth matters.** A payment is only marked `confirmed` once it
    reaches `CONFIRMATIONS_*`. Detecting a transaction in the mempool is **not**
@@ -43,10 +45,10 @@ simplifications. **Understand these before taking real money:**
 3. **Underpayments don't settle; overpayments do.** Matching requires
    `received >= expected`. Underpaid invoices stay pending and then expire.
 
-4. **Monero is private.** An incoming XMR transfer does not reveal a
-   destination address, so XMR matching is **amount-only**. For
-   reliable multi-invoice operation, issue a subaddress or integrated address
-   per payment and match on `subaddr_index` / `payment_id`.
+4. **Monero subaddresses.** Each XMR payment gets a unique subaddress
+   (`create_address`, labelled with the `orderId`); matching is by
+   `subaddr_index`, not by amount. The wallet detects incoming transfers across
+   all subaddresses of `XMR_ACCOUNT_INDEX`.
 
 5. **Amounts are crypto amounts**, not fiat. There is no exchange-rate feed;
    `amount` in `create-payment` is denominated in the chosen coin. Add a price
@@ -57,6 +59,12 @@ simplifications. **Understand these before taking real money:**
 
 7. **Run a single instance.** The poller must not run concurrently (PM2 config
    uses `instances: 1`). Put the admin endpoints behind auth/network controls.
+   The per-currency address index counter also assumes a single writer.
+
+8. **Per-address polling cost (BTC/ETH).** Because each invoice has its own
+   address, every poll cycle makes one explorer request per *open* BTC/ETH
+   invoice. With many concurrent invoices, mind the free-tier rate limits
+   (Blockstream, Etherscan) and raise `POLL_INTERVAL_MS` if needed.
 
 ---
 
@@ -68,7 +76,7 @@ Requires Node.js ≥ 18.
 cd payment-gateway
 npm install
 cp .env.example .env
-#   edit .env: set ADMIN_TOKEN, your receiving addresses, and API keys
+#   edit .env: set ADMIN_TOKEN, BTC_XPUB/ETH_XPUB, USDT_ADDRESS, and API keys
 npm start
 ```
 
@@ -174,8 +182,9 @@ Notes:
   digest auth. Keep the RPC bound to `127.0.0.1`.
 - The wallet must already exist (`monero-wallet-cli` to create/restore it). The
   wallet only needs the **view key** to *detect* incoming payments.
-- For per-invoice matching, generate a subaddress per payment
-  (`create_address` RPC) and extend `checkers/xmr.js` to match on
+- Per-invoice matching is built in: `create-payment` calls `create_address`
+  (account `XMR_ACCOUNT_INDEX`, labelled with the `orderId`) for a unique
+  subaddress, and `checkers/xmr.js` matches incoming transfers on
   `subaddr_index`.
 
 ---
@@ -223,10 +232,16 @@ Issue a certificate with `sudo certbot --nginx -d pay.yourdomain.com`.
 
 Every `POLL_INTERVAL_MS` the server:
 1. Expires `pending` invoices past `expiresAt` that have no detected tx.
-2. For each configured currency, fetches recent incoming transactions via the
-   checker and, for each open invoice, finds a tx where
-   `received >= expected`, `tx.timestamp >= createdAt − 10min`, and the tx hash
-   isn't already claimed by another invoice.
+2. For each open invoice, looks for a matching incoming tx with
+   `received >= expected`. *How* it scopes the match depends on the currency's
+   addressing mode:
+   - **BTC / ETH** (`derived`) — queries the invoice's own derived address; any
+     incoming tx to that address belongs to that invoice.
+   - **XMR** (`subaddress`) — one `get_transfers` call; matches the transfer
+     whose `subaddr_index` equals the invoice's stored `addressIndex`.
+   - **USDT** (`static`) — shared address, so it also requires
+     `tx.timestamp >= createdAt − 10min` and that the tx hash isn't already
+     claimed by another invoice.
 3. If the match has `>= CONFIRMATIONS_<CCY>` confirmations → mark `confirmed`,
    set `confirmedAt`, fire the webhook (once). Otherwise record the tx hash and
    confirmation count and keep polling.
