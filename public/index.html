@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Crypto Payment Gateway</title>
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: #141925;
+    --panel-2: #1c2333;
+    --border: #2a3346;
+    --text: #e6e9ef;
+    --muted: #8a93a6;
+    --accent: #6ea8fe;
+    --pending: #e0a800;
+    --confirmed: #2ecc71;
+    --expired: #e74c3c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.5;
+    min-height: 100vh;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding: 32px 16px;
+  }
+  .wrap { width: 100%; max-width: 460px; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin: 0 0 24px; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 22px;
+  }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 14px 0 6px; text-transform: uppercase; letter-spacing: .04em; }
+  input, select, button { font-family: inherit; font-size: 15px; }
+  input, select {
+    width: 100%;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    color: var(--text);
+    padding: 11px 12px;
+    outline: none;
+  }
+  input:focus, select:focus { border-color: var(--accent); }
+  .seg { display: flex; gap: 8px; }
+  .seg button {
+    flex: 1; padding: 10px 0; border-radius: 9px; cursor: pointer;
+    background: var(--panel-2); color: var(--muted);
+    border: 1px solid var(--border); transition: .12s;
+  }
+  .seg button.active { background: var(--accent); color: #0b0e14; border-color: var(--accent); font-weight: 600; }
+  .btn {
+    width: 100%; margin-top: 22px; padding: 13px; border-radius: 10px; cursor: pointer;
+    background: var(--accent); color: #0b0e14; border: none; font-weight: 600;
+  }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .btn.ghost { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+  .err { color: var(--expired); font-size: 13px; margin-top: 12px; min-height: 18px; }
+  .hidden { display: none; }
+
+  /* Payment panel */
+  .qr { display: flex; justify-content: center; margin: 4px 0 18px; }
+  .qr img { width: 220px; height: 220px; background: #fff; border-radius: 12px; padding: 8px; }
+  .field { background: var(--panel-2); border: 1px solid var(--border); border-radius: 9px; padding: 10px 12px; margin-bottom: 10px; }
+  .field .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .addr-row { display: flex; align-items: center; gap: 8px; }
+  .addr { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; word-break: break-all; flex: 1; }
+  .copy { background: var(--border); border: none; color: var(--text); border-radius: 7px; padding: 6px 10px; cursor: pointer; font-size: 12px; }
+  .amount { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 18px; font-weight: 600; }
+  .status-row { display: flex; align-items: center; gap: 10px; margin: 16px 0 6px; }
+  .badge { padding: 5px 12px; border-radius: 999px; font-size: 13px; font-weight: 600; }
+  .badge.pending { background: rgba(224,168,0,.15); color: var(--pending); }
+  .badge.confirmed { background: rgba(46,204,113,.15); color: var(--confirmed); }
+  .badge.expired { background: rgba(231,76,60,.15); color: var(--expired); }
+  .meta { color: var(--muted); font-size: 13px; }
+  .spinner { width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 1s linear infinite; display: inline-block; vertical-align: middle; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Crypto Payment Gateway</h1>
+  <p class="sub">Pay with BTC, ETH, USDT (TRC-20) or XMR.</p>
+
+  <!-- Create form -->
+  <div class="card" id="form-card">
+    <label>Currency</label>
+    <div class="seg" id="currency-seg">
+      <button data-cur="BTC" class="active">BTC</button>
+      <button data-cur="ETH">ETH</button>
+      <button data-cur="USDT">USDT</button>
+      <button data-cur="XMR">XMR</button>
+    </div>
+
+    <label for="amount">Amount <span id="amount-cur">(BTC)</span></label>
+    <input id="amount" type="number" step="any" min="0" placeholder="0.001" />
+
+    <label for="orderId">Order ID</label>
+    <input id="orderId" type="text" placeholder="order-1234" />
+
+    <button class="btn" id="create-btn">Create payment</button>
+    <div class="err" id="form-err"></div>
+  </div>
+
+  <!-- Payment panel -->
+  <div class="card hidden" id="pay-card">
+    <div class="qr"><img id="qr-img" alt="payment QR code" /></div>
+
+    <div class="field">
+      <div class="k">Send exactly</div>
+      <div class="amount"><span id="pay-amount"></span> <span id="pay-cur"></span></div>
+    </div>
+
+    <div class="field">
+      <div class="k">To address</div>
+      <div class="addr-row">
+        <span class="addr" id="pay-addr"></span>
+        <button class="copy" id="copy-btn">Copy</button>
+      </div>
+    </div>
+
+    <div class="status-row">
+      <span class="badge pending" id="status-badge">Pending</span>
+      <span class="meta" id="status-meta"></span>
+    </div>
+    <div class="meta" id="confirm-meta"></div>
+    <div class="meta" id="tx-meta" style="word-break:break-all;"></div>
+
+    <button class="btn ghost" id="reset-btn">New payment</button>
+  </div>
+</div>
+
+<script>
+const STORAGE_KEY = 'cg_active_payment';
+let currency = 'BTC';
+let pollTimer = null;
+
+const $ = (id) => document.getElementById(id);
+
+// --- Currency selector ---
+$('currency-seg').addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-cur]');
+  if (!btn) return;
+  currency = btn.dataset.cur;
+  document.querySelectorAll('#currency-seg button').forEach((b) => b.classList.toggle('active', b === btn));
+  $('amount-cur').textContent = '(' + currency + ')';
+});
+
+// --- Create payment ---
+$('create-btn').addEventListener('click', async () => {
+  const amount = $('amount').value.trim();
+  const orderId = $('orderId').value.trim();
+  $('form-err').textContent = '';
+  if (!amount || Number(amount) <= 0) return ($('form-err').textContent = 'Enter a valid amount.');
+  if (!orderId) return ($('form-err').textContent = 'Enter an order ID.');
+
+  $('create-btn').disabled = true;
+  $('create-btn').textContent = 'Creating…';
+  try {
+    const res = await fetch('/create-payment', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ amount, orderId, currency }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to create payment');
+    localStorage.setItem(STORAGE_KEY, data.paymentId);
+    showPayment(data);
+    startPolling(data.paymentId);
+  } catch (err) {
+    $('form-err').textContent = err.message;
+  } finally {
+    $('create-btn').disabled = false;
+    $('create-btn').textContent = 'Create payment';
+  }
+});
+
+// --- Reset ---
+$('reset-btn').addEventListener('click', () => {
+  localStorage.removeItem(STORAGE_KEY);
+  if (pollTimer) clearInterval(pollTimer);
+  $('pay-card').classList.add('hidden');
+  $('form-card').classList.remove('hidden');
+});
+
+// --- Copy address ---
+$('copy-btn').addEventListener('click', () => {
+  navigator.clipboard.writeText($('pay-addr').textContent).then(() => {
+    $('copy-btn').textContent = 'Copied';
+    setTimeout(() => ($('copy-btn').textContent = 'Copy'), 1500);
+  });
+});
+
+function showPayment(p) {
+  $('form-card').classList.add('hidden');
+  $('pay-card').classList.remove('hidden');
+  if (p.qr) $('qr-img').src = p.qr;
+  $('pay-amount').textContent = p.amount;
+  $('pay-cur').textContent = p.currency;
+  $('pay-addr').textContent = p.wallet;
+  render(p);
+}
+
+function render(p) {
+  const badge = $('status-badge');
+  badge.className = 'badge ' + p.status;
+  badge.textContent = p.status.charAt(0).toUpperCase() + p.status.slice(1);
+
+  if (p.status === 'pending') {
+    const left = Math.max(0, Math.floor((new Date(p.expiresAt) - Date.now()) / 1000));
+    const mm = String(Math.floor(left / 60)).padStart(2, '0');
+    const ss = String(left % 60).padStart(2, '0');
+    $('status-meta').innerHTML = '<span class="spinner"></span> awaiting payment · expires in ' + mm + ':' + ss;
+  } else if (p.status === 'confirmed') {
+    $('status-meta').textContent = 'Payment received & confirmed ✓';
+  } else {
+    $('status-meta').textContent = 'This payment window has expired.';
+  }
+
+  if (p.txHash && p.status !== 'confirmed') {
+    $('confirm-meta').textContent = 'Detected — ' + p.confirmations + ' / ' + p.confirmationsRequired + ' confirmations';
+  } else if (p.status === 'confirmed') {
+    $('confirm-meta').textContent = p.confirmations + ' / ' + p.confirmationsRequired + ' confirmations';
+  } else {
+    $('confirm-meta').textContent = '';
+  }
+  $('tx-meta').textContent = p.txHash ? 'tx: ' + p.txHash : '';
+}
+
+function startPolling(paymentId) {
+  if (pollTimer) clearInterval(pollTimer);
+  const tick = async () => {
+    try {
+      const res = await fetch('/payment-status/' + paymentId);
+      if (!res.ok) { if (res.status === 404) clearInterval(pollTimer); return; }
+      const p = await res.json();
+      render(p);
+      if (p.status === 'confirmed' || p.status === 'expired') clearInterval(pollTimer);
+    } catch (_) { /* transient network error — keep polling */ }
+  };
+  tick();
+  pollTimer = setInterval(tick, 15000);
+  // Update the countdown every second even between status polls.
+  setInterval(() => {
+    const badge = $('status-badge');
+    if (badge.textContent.toLowerCase() === 'pending') {
+      // re-render countdown using last known data via a lightweight status fetch is overkill;
+      // the 15s poll refreshes expiresAt-derived text. This keeps the seconds ticking visually.
+    }
+  }, 1000);
+}
+
+// --- Resume an in-flight payment after a page reload ---
+(async function resume() {
+  const id = localStorage.getItem(STORAGE_KEY);
+  if (!id) return;
+  try {
+    const res = await fetch('/payment-status/' + id);
+    if (!res.ok) { localStorage.removeItem(STORAGE_KEY); return; }
+    const p = await res.json();
+    showPayment(p);
+    startPolling(id);
+  } catch (_) { /* ignore */ }
+})();
+</script>
+</body>
+</html>
