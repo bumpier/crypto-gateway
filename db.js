@@ -28,33 +28,12 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_payments_txhash   ON payments(txHash);
 `);
 
-// --- migration: addressIndex column (SQLite has no ADD COLUMN IF NOT EXISTS) ---
-const paymentCols = db.prepare(`PRAGMA table_info(payments)`).all();
-if (!paymentCols.some((c) => c.name === 'addressIndex')) {
-  db.exec(`ALTER TABLE payments ADD COLUMN addressIndex INTEGER`);
-}
-
-// --- per-currency monotonic address index counter ---
-db.exec(`
-  CREATE TABLE IF NOT EXISTS address_counters (
-    currency  TEXT PRIMARY KEY,
-    nextIndex INTEGER NOT NULL DEFAULT 0
-  );
-`);
-
 const statements = {
   insert: db.prepare(`
     INSERT INTO payments
-      (paymentId, orderId, currency, amount, wallet, status, txHash, confirmations, addressIndex, createdAt, expiresAt, confirmedAt)
+      (paymentId, orderId, currency, amount, wallet, status, txHash, confirmations, createdAt, expiresAt, confirmedAt)
     VALUES
-      (@paymentId, @orderId, @currency, @amount, @wallet, @status, @txHash, @confirmations, @addressIndex, @createdAt, @expiresAt, @confirmedAt)
-  `),
-  // Atomic single-statement index allocation. Returns the index just handed out
-  // (0-based). better-sqlite3 v11 bundles SQLite >= 3.35 (RETURNING supported).
-  allocate: db.prepare(`
-    INSERT INTO address_counters (currency, nextIndex) VALUES (?, 1)
-    ON CONFLICT(currency) DO UPDATE SET nextIndex = nextIndex + 1
-    RETURNING nextIndex - 1 AS allocated
+      (@paymentId, @orderId, @currency, @amount, @wallet, @status, @txHash, @confirmations, @createdAt, @expiresAt, @confirmedAt)
   `),
   get: db.prepare(`SELECT * FROM payments WHERE paymentId = ?`),
   list: db.prepare(`SELECT * FROM payments ORDER BY createdAt DESC`),
@@ -89,9 +68,6 @@ module.exports = {
   },
   getPendingByCurrency(currency) {
     return statements.pendingByCurrency.all(currency);
-  },
-  allocateIndex(currency) {
-    return statements.allocate.get(currency).allocated;
   },
   txHashUsed(txHash, exceptPaymentId) {
     if (!txHash) return false;
