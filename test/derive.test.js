@@ -36,3 +36,22 @@ test('BTC provisionAddress returns address + the passed index', async () => {
 test('BTC deriveAddress throws on empty xpub (fail-closed)', () => {
   assert.throws(() => btc.deriveAddress('', 0), /BTC_XPUB/);
 });
+
+const { hdkey } = require('ethereumjs-wallet');
+const eth = require('../checkers/eth');
+
+// account xpub at m/44'/60'/0' from the same well-known seed
+const ETH_ACCOUNT_XPUB = hdkey.fromMasterSeed(SEED).derivePath("m/44'/60'/0'").publicExtendedKey();
+
+test('ETH derives the canonical vector address from the account xpub', () => {
+  assert.strictEqual(eth.deriveAddress(ETH_ACCOUNT_XPUB, 0), '0x9858EfFD232B4033E47d90003D41EC34EcaEda94');
+});
+
+test('ETH provisionAddress returns address + the passed index', async () => {
+  const out = await eth.provisionAddress({ cfg: { xpub: ETH_ACCOUNT_XPUB }, index: 0 });
+  assert.deepStrictEqual(out, { address: '0x9858EfFD232B4033E47d90003D41EC34EcaEda94', addressIndex: 0 });
+});
+
+test('ETH deriveAddress throws on empty xpub (fail-closed)', () => {
+  assert.throws(() => eth.deriveAddress('', 0), /ETH_XPUB/);
+});
