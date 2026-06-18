@@ -55,3 +55,14 @@ test('ETH provisionAddress returns address + the passed index', async () => {
 test('ETH deriveAddress throws on empty xpub (fail-closed)', () => {
   assert.throws(() => eth.deriveAddress('', 0), /ETH_XPUB/);
 });
+
+const usdt = require('../checkers/usdt');
+
+test('USDT provisionAddress returns the static address, null index', async () => {
+  const out = await usdt.provisionAddress({ cfg: { address: 'TXYZstaticUSDTaddress' } });
+  assert.deepStrictEqual(out, { address: 'TXYZstaticUSDTaddress', addressIndex: null });
+});
+
+test('USDT provisionAddress throws when unconfigured (fail-closed)', async () => {
+  await assert.rejects(() => usdt.provisionAddress({ cfg: { address: '' } }), /USDT_ADDRESS/);
+});
