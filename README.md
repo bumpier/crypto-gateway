@@ -1,7 +1,7 @@
 # Crypto Payment Gateway
 
 A self-hosted cryptocurrency payment gateway in Node.js + Express. Accepts
-**BTC**, **ETH**, **USDT (TRC-20)** and **XMR**, polls each chain for incoming
+**BTC**, **ETH**, **USDT (ERC-20)** and **XMR**, polls each chain for incoming
 payments, expires unpaid invoices, and fires a signed webhook on confirmation.
 
 ```
@@ -11,7 +11,7 @@ payment-gateway/
 ├── checkers/
 │   ├── btc.js             # Blockstream Esplora
 │   ├── eth.js             # Etherscan v2
-│   ├── usdt.js            # TronGrid (TRC-20)
+│   ├── usdt.js            # Etherscan v2 (USDT ERC-20 on Ethereum)
 │   └── xmr.js             # local monero-wallet-rpc
 ├── public/index.html      # single-page checkout UI
 ├── ecosystem.config.js    # PM2 process definition
@@ -37,8 +37,9 @@ simplifications. **Understand these before taking real money:**
 2. **Confirmation depth matters.** A payment is only marked `confirmed` once it
    reaches `CONFIRMATIONS_*`. Detecting a transaction in the mempool is **not**
    payment. Defaults: BTC=1, ETH=12, USDT=1, XMR=10 — raise BTC/ETH for larger
-   amounts. The USDT checker reports confirmed TronGrid transfers as 1
-   confirmation (TronGrid's TRC-20 endpoint does not expose depth).
+   amounts. USDT is an ERC-20 token on Ethereum, so its confirmations come from
+   Etherscan (real depth) — consider raising `CONFIRMATIONS_USDT` above 1 for
+   larger amounts, same as ETH.
 
 3. **Underpayments don't settle; overpayments do.** Matching requires
    `received >= expected`. Underpaid invoices stay pending and then expire.
@@ -80,7 +81,7 @@ Open <http://localhost:3000>.
 |----------|--------------|------------------------------------------|
 | BTC      | Blockstream  | No                                       |
 | ETH      | Etherscan v2 | Yes — <https://etherscan.io/myapikey>    |
-| USDT     | TronGrid     | Yes (free) — <https://www.trongrid.io/>  |
+| USDT     | Etherscan v2 | Yes — same key as ETH (ERC-20 on Ethereum)|
 | XMR      | your wallet  | No key; runs against monero-wallet-rpc   |
 
 ---

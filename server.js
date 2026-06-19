@@ -33,7 +33,7 @@ const CONFIG = {
   etherscanApi: process.env.ETHERSCAN_API || 'https://api.etherscan.io/v2/api',
   etherscanApiKey: process.env.ETHERSCAN_API_KEY || '',
   trongridApiKey: process.env.TRONGRID_API_KEY || '',
-  usdtContract: process.env.USDT_CONTRACT || 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t',
+  usdtContract: process.env.USDT_CONTRACT || '0xdAC17F958D2ee523a2206206994597C13D831ec7',
   xmrWalletRpc: process.env.XMR_WALLET_RPC || 'http://127.0.0.1:18082/json_rpc',
 };
 
