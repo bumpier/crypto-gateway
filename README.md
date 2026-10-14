@@ -92,6 +92,11 @@ Open <http://localhost:3000>.
 ```json
 { "amount": 0.001, "orderId": "order-1234", "currency": "BTC" }
 ```
+Optional `webhookUrl`: where this payment's confirmation is POSTed, for one
+gateway serving several shops. It must exactly match `WEBHOOK_URL` or an entry
+in `WEBHOOK_URLS`, otherwise the request fails with `400 webhookUrl is not
+allowed`. Omit it to use `WEBHOOK_URL`.
+
 Returns the payment record plus a `qr` (data-URL) and a wallet `uri`:
 ```json
 {
@@ -115,8 +120,11 @@ curl -H "x-admin-token: $ADMIN_TOKEN" http://localhost:3000/payments
 
 ### `POST /webhook-test`  *(admin)*
 Fires a sample webhook to `WEBHOOK_URL` so you can verify your receiver.
+Pass `{"url": "…"}` (or `?url=`) to test one allowlisted site instead.
 ```bash
 curl -X POST -H "x-admin-token: $ADMIN_TOKEN" http://localhost:3000/webhook-test
+curl -X POST -H "x-admin-token: $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"url":"https://shop-two.example/api/crypto-webhook"}' http://localhost:3000/webhook-test
 ```
 
 ### `GET /health`
@@ -225,9 +233,13 @@ Issue a certificate with `sudo certbot --nginx -d pay.yourdomain.com`.
 Every `POLL_INTERVAL_MS` the server:
 1. Expires `pending` invoices past `expiresAt` that have no detected tx.
 2. For each configured currency, fetches recent incoming transactions via the
-   checker and, for each open invoice, finds a tx where
-   `received >= expected`, `tx.timestamp >= createdAt − 10min`, and the tx hash
-   isn't already claimed by another invoice.
+   checker and pairs them with open invoices (`match.js`). An invoice already
+   tied to a tx only follows that tx. Every other tx, oldest first, goes to the
+   open invoice with the **largest expected amount it covers** (the closest
+   fit, ties to the oldest), where `received >= expected`,
+   `tx.timestamp >= createdAt − 10min`, and the tx hash isn't already claimed by
+   another invoice. Closest fit stops an overpayment for one order from
+   settling a cheaper order that happens to be pending at the same time.
 3. If the match has `>= CONFIRMATIONS_<CCY>` confirmations → mark `confirmed`,
    set `confirmedAt`, fire the webhook (once). Otherwise record the tx hash and
    confirmation count and keep polling.

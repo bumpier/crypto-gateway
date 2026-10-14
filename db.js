@@ -28,12 +28,19 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_payments_txhash   ON payments(txHash);
 `);
 
+// Upgrade databases created before per-payment webhooks: where this payment's
+// confirmation is POSTed (NULL = the gateway's WEBHOOK_URL). Idempotent.
+const columns = db.prepare('PRAGMA table_info(payments)').all().map((c) => c.name);
+if (!columns.includes('webhookUrl')) {
+  db.exec('ALTER TABLE payments ADD COLUMN webhookUrl TEXT');
+}
+
 const statements = {
   insert: db.prepare(`
     INSERT INTO payments
-      (paymentId, orderId, currency, amount, wallet, status, txHash, confirmations, createdAt, expiresAt, confirmedAt)
+      (paymentId, orderId, currency, amount, wallet, status, txHash, confirmations, createdAt, expiresAt, confirmedAt, webhookUrl)
     VALUES
-      (@paymentId, @orderId, @currency, @amount, @wallet, @status, @txHash, @confirmations, @createdAt, @expiresAt, @confirmedAt)
+      (@paymentId, @orderId, @currency, @amount, @wallet, @status, @txHash, @confirmations, @createdAt, @expiresAt, @confirmedAt, @webhookUrl)
   `),
   get: db.prepare(`SELECT * FROM payments WHERE paymentId = ?`),
   list: db.prepare(`SELECT * FROM payments ORDER BY createdAt DESC`),
@@ -58,7 +65,7 @@ const statements = {
 module.exports = {
   db,
   insertPayment(row) {
-    return statements.insert.run(row);
+    return statements.insert.run({ webhookUrl: null, ...row });
   },
   getPayment(paymentId) {
     return statements.get.get(paymentId);
