@@ -9,6 +9,7 @@ const QRCode = require('qrcode');
 const axios = require('axios');
 
 const db = require('./db');
+const { matchPayments } = require('./match');
 
 const checkers = {
   BTC: require('./checkers/btc'),
@@ -162,21 +163,13 @@ async function pollCurrency(currency) {
   }
 
   const required = CONFIRMATIONS[currency];
-  const epsilon = AMOUNT_EPSILON[currency] || 0;
+  // Closest-fit matching, one tx -> one order (see match.js).
+  const matches = matchPayments(pending, incoming, {
+    epsilon: AMOUNT_EPSILON[currency] || 0,
+    isTxUsed: (txHash, paymentId) => db.txHashUsed(txHash, paymentId),
+  });
 
-  for (const p of pending) {
-    const expected = parseFloat(p.amount);
-    // Allow 10 min of clock skew between our createdAt and the chain timestamp.
-    const createdSec = Math.floor(new Date(p.createdAt).getTime() / 1000) - 600;
-
-    const match = incoming.find((tx) =>
-      tx.amount + epsilon >= expected &&            // no underpayment settles
-      tx.timestamp >= createdSec &&                 // tx happened after we issued the request
-      (tx.txHash === p.txHash || !db.txHashUsed(tx.txHash, p.paymentId)) // one tx -> one order
-    );
-
-    if (!match) continue;
-
+  for (const { payment: p, tx: match } of matches) {
     if (match.confirmations >= required) {
       if (p.status !== 'confirmed') {
         db.markConfirmed(p.paymentId, match.txHash, match.confirmations, new Date().toISOString());
