@@ -10,6 +10,7 @@ const axios = require('axios');
 
 const db = require('./db');
 const { matchPayments } = require('./match');
+const { allowedWebhookUrls, resolveWebhookUrl } = require('./webhooks');
 
 const checkers = {
   BTC: require('./checkers/btc'),
@@ -27,6 +28,9 @@ const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS || 30000);
 const EXPIRY_MINUTES = Number(process.env.EXPIRY_MINUTES || 30);
 const WEBHOOK_URL = process.env.WEBHOOK_URL || '';
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || '';
+// Extra destinations a caller may choose per payment (comma-separated), on top
+// of the default WEBHOOK_URL — one gateway serving several shops.
+const ALLOWED_WEBHOOK_URLS = allowedWebhookUrls(WEBHOOK_URL, process.env.WEBHOOK_URLS);
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
 
 const CONFIG = {
@@ -123,8 +127,8 @@ function publicView(row, extra = {}) {
 // Webhooks
 // --------------------------------------------------------------------------
 
-async function fireWebhook(payload) {
-  if (!WEBHOOK_URL) {
+async function fireWebhook(payload, url = WEBHOOK_URL) {
+  if (!url) {
     return { ok: false, error: 'WEBHOOK_URL not configured' };
   }
   const body = JSON.stringify(payload);
@@ -134,7 +138,7 @@ async function fireWebhook(payload) {
       'sha256=' + crypto.createHmac('sha256', WEBHOOK_SECRET).update(body).digest('hex');
   }
   try {
-    const res = await axios.post(WEBHOOK_URL, body, { headers, timeout: 8000 });
+    const res = await axios.post(url, body, { headers, timeout: 8000 });
     return { ok: true, status: res.status };
   } catch (err) {
     const status = err.response ? err.response.status : null;
@@ -175,7 +179,7 @@ async function pollCurrency(currency) {
         db.markConfirmed(p.paymentId, match.txHash, match.confirmations, new Date().toISOString());
         const fresh = db.getPayment(p.paymentId);
         console.log(`[poll ${currency}] CONFIRMED ${p.paymentId} (order ${p.orderId}) tx=${match.txHash}`);
-        fireWebhook({ event: 'payment.confirmed', payment: publicView(fresh) });
+        fireWebhook({ event: 'payment.confirmed', payment: publicView(fresh) }, fresh.webhookUrl || WEBHOOK_URL);
       }
     } else {
       // Seen on-chain but not deep enough yet — record progress, keep polling.
@@ -225,9 +229,15 @@ app.get('/health', (_req, res) => {
   });
 });
 
-// POST /create-payment { amount, orderId, currency }
+// POST /create-payment { amount, orderId, currency, webhookUrl? }
 app.post('/create-payment', async (req, res) => {
-  const { amount, orderId, currency } = req.body || {};
+  const { amount, orderId, currency, webhookUrl } = req.body || {};
+
+  // Optional per-payment destination for the confirmation webhook (allowlisted).
+  const hook = resolveWebhookUrl(webhookUrl, ALLOWED_WEBHOOK_URLS);
+  if (!hook.ok) {
+    return res.status(400).json({ error: 'webhookUrl is not allowed' });
+  }
 
   if (!currency || !CURRENCIES.includes(currency)) {
     return res.status(400).json({ error: `currency must be one of ${CURRENCIES.join(', ')}` });
@@ -257,6 +267,7 @@ app.post('/create-payment', async (req, res) => {
     createdAt: now.toISOString(),
     expiresAt: new Date(now.getTime() + EXPIRY_MINUTES * 60_000).toISOString(),
     confirmedAt: null,
+    webhookUrl: hook.url, // null = WEBHOOK_URL
   };
 
   try {
@@ -284,7 +295,12 @@ app.get('/payments', requireAdmin, (_req, res) => {
 });
 
 // POST /webhook-test  (admin — fires a sample webhook so you can verify wiring)
-app.post('/webhook-test', requireAdmin, async (_req, res) => {
+// Optional { url } (or ?url=) targets one allowlisted site; default WEBHOOK_URL.
+app.post('/webhook-test', requireAdmin, async (req, res) => {
+  const hook = resolveWebhookUrl((req.body && req.body.url) || req.query.url, ALLOWED_WEBHOOK_URLS);
+  if (!hook.ok) {
+    return res.status(400).json({ error: 'url is not allowed' });
+  }
   const result = await fireWebhook({
     event: 'payment.confirmed',
     test: true,
@@ -296,7 +312,7 @@ app.post('/webhook-test', requireAdmin, async (_req, res) => {
       status: 'confirmed',
       txHash: '0000000000000000000000000000000000000000000000000000000000000000',
     },
-  });
+  }, hook.url || WEBHOOK_URL);
   res.status(result.ok ? 200 : 502).json(result);
 });
 
@@ -311,6 +327,7 @@ const server = app.listen(PORT, () => {
   console.log(`  poll interval         : ${POLL_INTERVAL_MS}ms`);
   console.log(`  expiry window         : ${EXPIRY_MINUTES} min`);
   console.log(`  webhook               : ${WEBHOOK_URL ? WEBHOOK_URL : '(not configured)'}`);
+  console.log(`  allowed webhooks      : ${ALLOWED_WEBHOOK_URLS.size ? [...ALLOWED_WEBHOOK_URLS].join(', ') : '(none)'}`);
 
   // Run an initial sweep shortly after boot, then on the configured interval.
   setTimeout(() => { poll(); }, 2000);
